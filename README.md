@@ -83,11 +83,11 @@ Returns server status and database information.
 }
 ```
 
-#### Execute Query (POST)
+#### Execute Query (Data Retrieval)
 
 **POST** `/query`
 
-Execute SQL queries using JSON request body.
+Execute SQL queries that return data (SELECT statements). Optimized for data retrieval operations.
 
 **Request:**
 ```json
@@ -101,12 +101,12 @@ Execute SQL queries using JSON request body.
 {
   "success": true,
   "data": {
+    "columns": ["name", "age"],
     "rows": [
       ["Alice", 25],
       ["Bob", 30]
     ],
-    "row_count": 2,
-    "rows_affected": 0
+    "row_count": 2
   },
   "error": null,
   "query_id": "uuid-here",
@@ -118,25 +118,64 @@ Execute SQL queries using JSON request body.
 
 **GET** `/query?sql=<encoded-sql>`
 
-Execute SQL queries using URL parameters.
+Execute SQL queries using URL parameters for data retrieval.
 
 **Example:**
 ```bash
 curl "http://localhost:3001/query?sql=SELECT%20COUNT(*)%20FROM%20users"
 ```
 
+#### Execute Command (Data Modification)
+
+**POST** `/execute`
+
+Execute SQL commands that modify data (CREATE, INSERT, UPDATE, DELETE, DROP, ALTER). Optimized for data modification operations.
+
+**Request:**
+```json
+{
+  "sql": "INSERT INTO users VALUES (3, 'Charlie', 28)"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "rows": [],
+    "row_count": 0,
+    "rows_affected": 1
+  },
+  "error": null,
+  "query_id": "uuid-here",
+  "execution_time_ms": 8
+}
+```
+
+#### Execute Command (GET)
+
+**GET** `/execute?sql=<encoded-sql>`
+
+Execute SQL commands using URL parameters for data modification.
+
+**Example:**
+```bash
+curl "http://localhost:3001/execute?sql=CREATE%20TABLE%20test%20(id%20INT)"
+```
+
 ### Example Requests
 
 #### Create Table
 ```bash
-curl -X POST http://localhost:3001/query \
+curl -X POST http://localhost:3001/execute \
   -H "Content-Type: application/json" \
   -d '{"sql": "CREATE TABLE users (id INT, name TEXT, age INT)"}'
 ```
 
 #### Insert Data
 ```bash
-curl -X POST http://localhost:3001/query \
+curl -X POST http://localhost:3001/execute \
   -H "Content-Type: application/json" \
   -d '{"sql": "INSERT INTO users VALUES (1, '\''Alice'\'', 25), (2, '\''Bob'\'', 30)"}'
 ```
@@ -153,6 +192,20 @@ curl -X POST http://localhost:3001/query \
 curl -X POST http://localhost:3001/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT age, COUNT(*) as count FROM users GROUP BY age ORDER BY age"}'
+```
+
+#### Update Data
+```bash
+curl -X POST http://localhost:3001/execute \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "UPDATE users SET age = 26 WHERE name = '\''Alice'\''"}'
+```
+
+#### Delete Data
+```bash
+curl -X POST http://localhost:3001/execute \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "DELETE FROM users WHERE age < 25"}'
 ```
 
 ## Usage Patterns

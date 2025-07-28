@@ -20,7 +20,7 @@ use uuid::Uuid;
 #[command(name = "rsduck")]
 #[command(about = "A DuckDB REST server")]
 #[command(version = "1.0")]
-struct Args {
+pub struct Args {
     /// DuckDB database file path (uses in-memory database if not specified)
     #[arg(short, long)]
     database: Option<PathBuf>,
@@ -211,42 +211,195 @@ async fn execute_query_internal(
 }
 
 fn execute_sql(state: &AppState, sql: &str) -> DuckResult<serde_json::Value> {
-    let conn = state.db.lock().unwrap();
+    let conn = state.db.lock().map_err(|_| duckdb::Error::InvalidParameterName("Database connection poisoned".to_string()))?;
     
-    // First try to execute as a non-query (CREATE, INSERT, UPDATE, DELETE, etc.)
-    if let Ok(updated) = conn.execute(sql, []) {
-        return Ok(serde_json::json!({
-            "rows": [],
-            "row_count": 0,
-            "rows_affected": updated
-        }));
-    }
-
-    // If that fails, try as a query (SELECT)
+    // Always treat as a query that returns data
     let mut stmt = conn.prepare(sql)?;
+    
+    // Execute the query first and collect results
     let rows = stmt.query_map([], |row| {
-        // Simple approach: just get the first column value
-        let value = match row.get::<usize, String>(0) {
-            Ok(s) => serde_json::Value::String(s),
-            Err(_) => {
-                // Try as integer
-                match row.get::<usize, i64>(0) {
-                    Ok(i) => serde_json::Value::Number(i.into()),
-                    Err(_) => serde_json::Value::String("result".to_string()),
-                }
-            }
-        };
-        Ok(vec![value])
+        let column_count = row.as_ref().column_count();
+        let mut row_data = Vec::new();
+        for i in 0..column_count {
+            // Use get_ref to avoid automatic type conversion and handle manually
+            let value = match row.get_ref(i) {
+                Ok(value_ref) => {
+                    use duckdb::types::ValueRef;
+                    match value_ref {
+                        ValueRef::Null => serde_json::Value::Null,
+                        ValueRef::Boolean(b) => serde_json::Value::Bool(b),
+                        ValueRef::TinyInt(i) => serde_json::Value::Number((i as i64).into()),
+                        ValueRef::SmallInt(i) => serde_json::Value::Number((i as i64).into()),
+                        ValueRef::Int(i) => serde_json::Value::Number((i as i64).into()),
+                        ValueRef::BigInt(i) => serde_json::Value::Number(i.into()),
+                        ValueRef::HugeInt(i) => serde_json::Value::Number((i as i64).into()),
+                        ValueRef::UTinyInt(i) => serde_json::Value::Number((i as i64).into()),
+                        ValueRef::USmallInt(i) => serde_json::Value::Number((i as i64).into()),
+                        ValueRef::UInt(i) => serde_json::Value::Number((i as i64).into()),
+                        ValueRef::UBigInt(i) => serde_json::Value::Number((i as i64).into()),
+                        ValueRef::Float(f) => match serde_json::Number::from_f64(f as f64) {
+                            Some(num) => serde_json::Value::Number(num),
+                            None => serde_json::Value::Null,
+                        },
+                        ValueRef::Double(f) => match serde_json::Number::from_f64(f) {
+                            Some(num) => serde_json::Value::Number(num),
+                            None => serde_json::Value::Null,
+                        },
+                        ValueRef::Text(s) => serde_json::Value::String(String::from_utf8_lossy(s).to_string()),
+                        ValueRef::Blob(b) => serde_json::Value::String(format!("{:?}", b)),
+                        _ => serde_json::Value::String(format!("{:?}", value_ref)),
+                    }
+                },
+                Err(_) => serde_json::Value::Null,
+            };
+            row_data.push(value);
+        }
+        Ok((column_count, row_data))
     })?;
 
+    // Collect all rows first
     let mut result_rows = Vec::new();
+    let mut detected_column_count = 0;
+    
     for row_result in rows {
-        result_rows.push(row_result?);
+        let (row_column_count, row_data) = row_result?;
+        if detected_column_count == 0 {
+            detected_column_count = row_column_count;
+        }
+        result_rows.push(row_data);
+    }
+    
+    // Now get column names after query execution is complete
+    let column_count = if detected_column_count > 0 { 
+        detected_column_count 
+    } else { 
+        stmt.column_count() 
+    };
+    
+    let mut column_names = Vec::new();
+    for i in 0..column_count {
+        let column_name = match stmt.column_name(i) {
+            Ok(name) => name.to_string(),
+            Err(_) => format!("column_{}", i),
+        };
+        column_names.push(column_name);
     }
 
     Ok(serde_json::json!({
+        "columns": column_names,
         "rows": result_rows,
         "row_count": result_rows.len()
+    }))
+}
+
+async fn execute_command_post(
+    State(state): State<AppState>,
+    Json(request): Json<QueryRequest>,
+) -> (StatusCode, Json<QueryResponse>) {
+    execute_command_internal(state, request.sql).await
+}
+
+async fn execute_command_get(
+    State(state): State<AppState>,
+    Query(params): Query<QueryParams>,
+) -> (StatusCode, Json<QueryResponse>) {
+    match params.sql {
+        Some(sql) => execute_command_internal(state, sql).await,
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(QueryResponse {
+                success: false,
+                data: None,
+                error: Some("Missing 'sql' parameter".to_string()),
+                query_id: Uuid::new_v4().to_string(),
+                execution_time_ms: 0,
+            }),
+        ),
+    }
+}
+
+async fn execute_command_internal(
+    state: AppState,
+    sql: String,
+) -> (StatusCode, Json<QueryResponse>) {
+    let query_id = Uuid::new_v4().to_string();
+    let start_time = SystemTime::now();
+
+    // Check if it's a write operation on a readonly database
+    if state.is_readonly {
+        let sql_upper = sql.trim().to_uppercase();
+        if sql_upper.starts_with("INSERT") || 
+           sql_upper.starts_with("UPDATE") || 
+           sql_upper.starts_with("DELETE") || 
+           sql_upper.starts_with("CREATE") || 
+           sql_upper.starts_with("DROP") || 
+           sql_upper.starts_with("ALTER") {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(QueryResponse {
+                    success: false,
+                    data: None,
+                    error: Some("Database is opened in read-only mode. Write operations are not allowed.".to_string()),
+                    query_id,
+                    execution_time_ms: 0,
+                }),
+            );
+        }
+    }
+
+    let result = tokio::task::spawn_blocking(move || {
+        execute_sql_command(&state, &sql)
+    }).await;
+
+    let execution_time_ms = start_time.elapsed().unwrap_or_default().as_millis() as u64;
+
+    match result {
+        Ok(sql_result) => {
+            match sql_result {
+                Ok(data) => (
+                    StatusCode::OK,
+                    Json(QueryResponse {
+                        success: true,
+                        data: Some(data),
+                        error: None,
+                        query_id,
+                        execution_time_ms,
+                    }),
+                ),
+                Err(e) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(QueryResponse {
+                        success: false,
+                        data: None,
+                        error: Some(e.to_string()),
+                        query_id,
+                        execution_time_ms,
+                    }),
+                ),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(QueryResponse {
+                success: false,
+                data: None,
+                error: Some(format!("Task execution error: {}", e)),
+                query_id,
+                execution_time_ms,
+            }),
+        ),
+    }
+}
+
+fn execute_sql_command(state: &AppState, sql: &str) -> DuckResult<serde_json::Value> {
+    let conn = state.db.lock().map_err(|_| duckdb::Error::InvalidParameterName("Database connection poisoned".to_string()))?;
+    
+    // Execute as a non-query command (CREATE, INSERT, UPDATE, DELETE, etc.)
+    let updated = conn.execute(sql, [])?;
+    Ok(serde_json::json!({
+        "rows": [],
+        "row_count": 0,
+        "rows_affected": updated
     }))
 }
 
@@ -259,6 +412,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_check))
         .route("/query", post(execute_query_post))
         .route("/query", get(execute_query_get))
+        .route("/execute", post(execute_command_post))
+        .route("/execute", get(execute_command_get))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -268,8 +423,10 @@ async fn main() -> anyhow::Result<()> {
     println!("DuckDB REST server running on http://{}", bind_addr);
     println!("Endpoints:");
     println!("  GET  /health - Health check");
-    println!("  POST /query  - Execute SQL query (JSON body)");
-    println!("  GET  /query?sql=<query> - Execute SQL query (URL parameter)");
+    println!("  POST /query  - Execute SQL query that returns data (JSON body)");
+    println!("  GET  /query?sql=<query> - Execute SQL query that returns data (URL parameter)");
+    println!("  POST /execute - Execute SQL command (CREATE, INSERT, etc.) (JSON body)");
+    println!("  GET  /execute?sql=<command> - Execute SQL command (CREATE, INSERT, etc.) (URL parameter)");
     println!();
     println!("Usage examples:");
     println!("  cargo run                                    # In-memory database");
