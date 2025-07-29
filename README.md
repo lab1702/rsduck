@@ -25,6 +25,14 @@ A production-ready, high-performance REST API server for DuckDB written in Rust.
 
 ### Installation
 
+#### Simple Method (Recommended)
+
+```bash
+cargo install --git https://github.com/lab1702/rsduck
+```
+
+#### From Source
+
 ```bash
 git clone <repository-url>
 cd rsduck
