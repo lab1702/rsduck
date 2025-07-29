@@ -247,6 +247,22 @@ fn convert_value_to_json(
                     // Instead provide metadata about the blob
                     serde_json::Value::String(format!("<BLOB {} bytes>", b.len()))
                 }
+                ValueRef::Decimal(d) => {
+                    // Convert DECIMAL to string to preserve precision
+                    serde_json::Value::String(d.to_string())
+                }
+                ValueRef::Date32(d) => {
+                    // Convert date to string representation
+                    serde_json::Value::String(d.to_string())
+                }
+                ValueRef::Time64(_, t) => {
+                    // Convert time to string representation
+                    serde_json::Value::String(t.to_string())
+                }
+                ValueRef::Timestamp(_, ts) => {
+                    // Convert timestamp to string representation
+                    serde_json::Value::String(ts.to_string())
+                }
                 _ => {
                     // For security, don't expose raw debug info for unknown types
                     // Instead provide a safe generic message

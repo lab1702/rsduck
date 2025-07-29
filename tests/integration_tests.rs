@@ -183,6 +183,44 @@ async fn test_missing_sql_parameter() {
     );
 }
 
+#[tokio::test]
+async fn test_decimal_type_handling() {
+    let args = Args {
+        database: None,
+        readwrite: false,
+        port: 3001,
+        host: "0.0.0.0".to_string(),
+    };
+
+    let state = AppState::new(&args).expect("Failed to create app state");
+    let app = create_test_app(state);
+    let server = TestServer::new(app).expect("Failed to create test server");
+
+    let query = serde_json::json!({
+        "sql": "SELECT 123.45::DECIMAL(10,2) as decimal_col, CAST('2023-01-01' AS DATE) as date_col"
+    });
+
+    let response = server.post("/query").json(&query).await;
+
+    assert_eq!(response.status_code(), 200);
+
+    let body: Value = response.json();
+    assert_eq!(body["success"], true);
+    assert_eq!(body["data"]["columns"], json!(["decimal_col", "date_col"]));
+    
+    let rows = &body["data"]["rows"];
+    assert!(rows.is_array());
+    let first_row = &rows[0];
+    
+    // The decimal should be converted to string, not <UNSUPPORTED_TYPE>
+    assert!(first_row[0].is_string());
+    assert_ne!(first_row[0].as_str().unwrap(), "<UNSUPPORTED_TYPE>");
+    
+    // The date should also be converted to string, not <UNSUPPORTED_TYPE>
+    assert!(first_row[1].is_string());
+    assert_ne!(first_row[1].as_str().unwrap(), "<UNSUPPORTED_TYPE>");
+}
+
 fn create_test_app(state: AppState) -> axum::Router {
     use axum::routing::{get, post};
     use rsduck::{
