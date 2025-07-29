@@ -1,9 +1,10 @@
 use clap::Parser;
+use duckdb::{Config, Connection};
+use r2d2::{Pool, PooledConnection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use duckdb::{Connection, Config};
-use r2d2::{Pool, PooledConnection};
-use tracing::{info, debug};
+use tracing::{debug, info};
+use utoipa::ToSchema;
 
 /// Type alias for the DuckDB connection pool
 pub type DuckDbPool = Pool<DuckDbConnectionManager>;
@@ -90,7 +91,7 @@ impl AppState {
     /// Create new application state from command line arguments
     pub fn new(args: &Args) -> anyhow::Result<Self> {
         let is_readonly = args.database.is_some() && !args.readwrite;
-        
+
         if let Some(path) = &args.database {
             if args.readwrite {
                 info!("Opening database file: {:?} (read-write)", path);
@@ -103,12 +104,12 @@ impl AppState {
 
         debug!("Creating connection manager");
         let manager = DuckDbConnectionManager::new(args.database.clone(), is_readonly);
-        
+
         debug!("Building connection pool with max size 10");
         let pool = Pool::builder()
             .max_size(10) // Maximum 10 connections in the pool
             .build(manager)?;
-            
+
         info!("Database connection pool initialized successfully");
 
         Ok(Self {
@@ -120,34 +121,56 @@ impl AppState {
 }
 
 /// Query parameters for GET requests
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct QueryParams {
+    /// SQL query to execute
+    #[schema(example = "SELECT * FROM users")]
     pub sql: Option<String>,
+    /// Maximum number of rows to return
+    #[schema(example = 100)]
     pub limit: Option<usize>,
 }
 
 /// Request body for POST requests
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct QueryRequest {
+    /// SQL query to execute
+    #[schema(example = "SELECT * FROM users")]
     pub sql: String,
+    /// Maximum number of rows to return
+    #[schema(example = 100)]
     pub limit: Option<usize>,
 }
 
 /// Response structure for query results
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct QueryResponse {
+    /// Whether the query was successful
     pub success: bool,
+    /// Query result data (if successful)
     pub data: Option<serde_json::Value>,
+    /// Error message (if failed)
     pub error: Option<String>,
+    /// Unique identifier for this query
+    #[schema(example = "123e4567-e89b-12d3-a456-426614174000")]
     pub query_id: String,
+    /// Query execution time in milliseconds
+    #[schema(example = 42)]
     pub execution_time_ms: u64,
 }
 
 /// Response structure for health check endpoint
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
+    /// Server status
+    #[schema(example = "healthy")]
     pub status: String,
+    /// Unix timestamp
+    #[schema(example = 1698765432)]
     pub timestamp: u64,
+    /// Database file path (if using file database)
+    #[schema(example = "/path/to/database.duckdb")]
     pub database_path: Option<String>,
+    /// Whether database is in read-only mode
     pub readonly_mode: bool,
 }

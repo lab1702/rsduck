@@ -2,34 +2,58 @@ use axum::{
     extract::{Query, State},
     response::{Json, Response},
 };
-use uuid::Uuid;
 use std::time::SystemTime;
-use tracing::{info, warn, error, instrument};
+use tracing::{error, info, instrument, warn};
+use utoipa;
+use uuid::Uuid;
 
-use crate::{AppState, QueryRequest, QueryParams, QueryResponse, HealthResponse, ApiError};
-use crate::database::{validate_readonly_operation, execute_sql_with_limit, execute_sql_command};
+use crate::database::{execute_sql_command, execute_sql_with_limit, validate_readonly_operation};
+use crate::{ApiError, AppState, HealthResponse, QueryParams, QueryRequest, QueryResponse};
 
 /// Health check endpoint handler
 /// Returns server status, timestamp, database info, and read-only mode status
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, description = "Server health status", body = HealthResponse)
+    ),
+    tag = "health"
+)]
 #[instrument(skip(state))]
 pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
     let timestamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    
+
     info!("Health check requested");
-    
+
     Json(HealthResponse {
         status: "healthy".to_string(),
         timestamp,
-        database_path: state.db_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        database_path: state
+            .db_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string()),
         readonly_mode: state.is_readonly,
     })
 }
 
 /// POST endpoint handler for SQL query execution
 /// Accepts SQL queries in request body with optional row limit
+#[utoipa::path(
+    post,
+    path = "/query",
+    request_body = QueryRequest,
+    responses(
+        (status = 200, description = "Query executed successfully", body = QueryResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Operation forbidden in read-only mode"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "query"
+)]
 #[instrument(skip(state, request), fields(sql_length = request.sql.len(), limit = request.limit))]
 pub async fn execute_query_post(
     State(state): State<AppState>,
@@ -41,6 +65,21 @@ pub async fn execute_query_post(
 
 /// GET endpoint handler for SQL query execution
 /// Accepts SQL queries as URL parameters with optional row limit
+#[utoipa::path(
+    get,
+    path = "/query",
+    params(
+        ("sql" = Option<String>, Query, description = "SQL query to execute"),
+        ("limit" = Option<usize>, Query, description = "Maximum number of rows to return")
+    ),
+    responses(
+        (status = 200, description = "Query executed successfully", body = QueryResponse),
+        (status = 400, description = "Bad request - missing SQL parameter"),
+        (status = 403, description = "Operation forbidden in read-only mode"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "query"
+)]
 #[instrument(skip(state, params), fields(sql_length = params.sql.as_ref().map(|s| s.len()), limit = params.limit))]
 pub async fn execute_query_get(
     State(state): State<AppState>,
@@ -67,7 +106,7 @@ async fn execute_query_internal(
     let query_id = Uuid::new_v4().to_string();
     tracing::Span::current().record("query_id", &query_id);
     tracing::Span::current().record("limit", &limit);
-    
+
     let start_time = SystemTime::now();
     info!("Starting query execution");
 
@@ -79,45 +118,45 @@ async fn execute_query_internal(
     }
 
     // Execute query in blocking task
-    let result = tokio::task::spawn_blocking(move || {
-        execute_sql_with_limit(&state, &sql, limit)
-    }).await;
+    let result =
+        tokio::task::spawn_blocking(move || execute_sql_with_limit(&state, &sql, limit)).await;
 
     let execution_time_ms = start_time.elapsed().unwrap_or_default().as_millis() as u64;
 
     match result {
-        Ok(sql_result) => {
-            match sql_result {
-                Ok(data) => {
-                    let row_count = data.get("row_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let truncated = data.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
-                    
-                    info!(
-                        execution_time_ms = execution_time_ms,
-                        row_count = row_count,
-                        truncated = truncated,
-                        "Query executed successfully"
-                    );
-                    
-                    Ok(Json(QueryResponse {
-                        success: true,
-                        data: Some(data),
-                        error: None,
-                        query_id,
-                        execution_time_ms,
-                    }))
-                },
-                Err(e) => {
-                    error!(
-                        execution_time_ms = execution_time_ms,
-                        error = %e,
-                        "Query execution failed"
-                    );
-                    let error = ApiError::Database(e);
-                    Err(error.to_response(Some(query_id)))
-                },
+        Ok(sql_result) => match sql_result {
+            Ok(data) => {
+                let row_count = data.get("row_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                let truncated = data
+                    .get("truncated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                info!(
+                    execution_time_ms = execution_time_ms,
+                    row_count = row_count,
+                    truncated = truncated,
+                    "Query executed successfully"
+                );
+
+                Ok(Json(QueryResponse {
+                    success: true,
+                    data: Some(data),
+                    error: None,
+                    query_id,
+                    execution_time_ms,
+                }))
             }
-        }
+            Err(e) => {
+                error!(
+                    execution_time_ms = execution_time_ms,
+                    error = %e,
+                    "Query execution failed"
+                );
+                let error = ApiError::Database(e);
+                Err(error.to_response(Some(query_id)))
+            }
+        },
         Err(e) => {
             error!(
                 execution_time_ms = execution_time_ms,
@@ -126,10 +165,22 @@ async fn execute_query_internal(
             );
             let error = ApiError::internal_server_error(format!("Task execution error: {}", e));
             Err(error.to_response(Some(query_id)))
-        },
+        }
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/execute",
+    request_body = QueryRequest,
+    responses(
+        (status = 200, description = "Command executed successfully", body = QueryResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Operation forbidden in read-only mode"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "execute"
+)]
 #[instrument(skip(state, request), fields(sql_length = request.sql.len()))]
 pub async fn execute_command_post(
     State(state): State<AppState>,
@@ -139,6 +190,20 @@ pub async fn execute_command_post(
     execute_command_internal(state, request.sql).await
 }
 
+#[utoipa::path(
+    get,
+    path = "/execute",
+    params(
+        ("sql" = Option<String>, Query, description = "SQL command to execute")
+    ),
+    responses(
+        (status = 200, description = "Command executed successfully", body = QueryResponse),
+        (status = 400, description = "Bad request - missing SQL parameter"),
+        (status = 403, description = "Operation forbidden in read-only mode"),
+        (status = 500, description = "Internal server error")
+    ),
+    tag = "execute"
+)]
 #[instrument(skip(state, params), fields(sql_length = params.sql.as_ref().map(|s| s.len())))]
 pub async fn execute_command_get(
     State(state): State<AppState>,
@@ -163,7 +228,7 @@ async fn execute_command_internal(
 ) -> Result<Json<QueryResponse>, Response> {
     let query_id = Uuid::new_v4().to_string();
     tracing::Span::current().record("query_id", &query_id);
-    
+
     let start_time = SystemTime::now();
     info!("Starting command execution");
 
@@ -175,43 +240,42 @@ async fn execute_command_internal(
     }
 
     // Execute command in blocking task
-    let result = tokio::task::spawn_blocking(move || {
-        execute_sql_command(&state, &sql)
-    }).await;
+    let result = tokio::task::spawn_blocking(move || execute_sql_command(&state, &sql)).await;
 
     let execution_time_ms = start_time.elapsed().unwrap_or_default().as_millis() as u64;
 
     match result {
-        Ok(sql_result) => {
-            match sql_result {
-                Ok(data) => {
-                    let rows_affected = data.get("rows_affected").and_then(|v| v.as_u64()).unwrap_or(0);
-                    
-                    info!(
-                        execution_time_ms = execution_time_ms,
-                        rows_affected = rows_affected,
-                        "Command executed successfully"
-                    );
-                    
-                    Ok(Json(QueryResponse {
-                        success: true,
-                        data: Some(data),
-                        error: None,
-                        query_id,
-                        execution_time_ms,
-                    }))
-                },
-                Err(e) => {
-                    error!(
-                        execution_time_ms = execution_time_ms,
-                        error = %e,
-                        "Command execution failed"
-                    );
-                    let error = ApiError::Database(e);
-                    Err(error.to_response(Some(query_id)))
-                },
+        Ok(sql_result) => match sql_result {
+            Ok(data) => {
+                let rows_affected = data
+                    .get("rows_affected")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                info!(
+                    execution_time_ms = execution_time_ms,
+                    rows_affected = rows_affected,
+                    "Command executed successfully"
+                );
+
+                Ok(Json(QueryResponse {
+                    success: true,
+                    data: Some(data),
+                    error: None,
+                    query_id,
+                    execution_time_ms,
+                }))
             }
-        }
+            Err(e) => {
+                error!(
+                    execution_time_ms = execution_time_ms,
+                    error = %e,
+                    "Command execution failed"
+                );
+                let error = ApiError::Database(e);
+                Err(error.to_response(Some(query_id)))
+            }
+        },
         Err(e) => {
             error!(
                 execution_time_ms = execution_time_ms,
@@ -220,6 +284,6 @@ async fn execute_command_internal(
             );
             let error = ApiError::internal_server_error(format!("Task execution error: {}", e));
             Err(error.to_response(Some(query_id)))
-        },
+        }
     }
 }
