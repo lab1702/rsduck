@@ -187,9 +187,11 @@ pub fn execute_sql_with_limit(
     };
 
     let column_names = get_column_names(&stmt, column_count)?;
+    let column_types = get_column_types(&stmt, column_count)?;
 
     let mut response = serde_json::json!({
         "columns": column_names,
+        "column_types": column_types,
         "rows": result_rows,
         "row_count": result_rows.len(),
         "limit_applied": limit
@@ -248,8 +250,15 @@ fn convert_value_to_json(
                     serde_json::Value::String(format!("<BLOB {} bytes>", b.len()))
                 }
                 ValueRef::Decimal(d) => {
-                    // Convert DECIMAL to string to preserve precision
-                    serde_json::Value::String(d.to_string())
+                    // Convert DECIMAL to JSON number, fallback to string if parsing fails
+                    let decimal_str = d.to_string();
+                    match decimal_str.parse::<f64>() {
+                        Ok(num) => match serde_json::Number::from_f64(num) {
+                            Some(json_num) => serde_json::Value::Number(json_num),
+                            None => serde_json::Value::String(decimal_str),
+                        },
+                        Err(_) => serde_json::Value::String(decimal_str),
+                    }
                 }
                 ValueRef::Date32(d) => {
                     // Convert date to string representation
@@ -262,6 +271,22 @@ fn convert_value_to_json(
                 ValueRef::Timestamp(_, ts) => {
                     // Convert timestamp to string representation
                     serde_json::Value::String(ts.to_string())
+                }
+                ValueRef::Interval { months, days, nanos } => {
+                    // Convert interval to string representation
+                    serde_json::Value::String(format!("{}M {}D {}ns", months, days, nanos))
+                }
+                ValueRef::List(_, _) => {
+                    // For now, convert list to basic string representation
+                    serde_json::Value::String("<LIST>".to_string())
+                }
+                ValueRef::Map(_, _) => {
+                    // For now, convert map to basic string representation  
+                    serde_json::Value::String("<MAP>".to_string())
+                }
+                ValueRef::Struct(_, _) => {
+                    // For now, convert struct to basic string representation
+                    serde_json::Value::String("<STRUCT>".to_string())
                 }
                 _ => {
                     // For security, don't expose raw debug info for unknown types
@@ -288,6 +313,48 @@ fn get_column_names(
         column_names.push(column_name);
     }
     Ok(column_names)
+}
+
+fn get_column_types(
+    stmt: &duckdb::Statement,
+    column_count: usize,
+) -> Result<Vec<String>, DatabaseError> {
+    let mut column_types = Vec::new();
+    for i in 0..column_count {
+        let column_type = stmt.column_type(i);
+        // For now, let's see what the actual type looks like
+        let type_str = format!("{:?}", column_type);
+        // Convert debug format to SQL type names
+        let sql_type = match type_str.as_str() {
+            s if s.contains("Int32") => "INTEGER",
+            s if s.contains("Int64") => "BIGINT",
+            s if s.contains("Int8") => "TINYINT", 
+            s if s.contains("Int16") => "SMALLINT",
+            s if s.contains("UInt8") => "UTINYINT",
+            s if s.contains("UInt16") => "USMALLINT", 
+            s if s.contains("UInt32") => "UINTEGER",
+            s if s.contains("UInt64") => "UBIGINT",
+            s if s.contains("Float32") => "FLOAT",
+            s if s.contains("Float64") => "DOUBLE",
+            s if s.contains("Boolean") => "BOOLEAN",
+            s if s.contains("Utf8") => "VARCHAR",
+            s if s.contains("LargeUtf8") => "VARCHAR",
+            s if s.contains("Binary") => "BLOB",
+            s if s.contains("LargeBinary") => "BLOB",
+            s if s.contains("Date32") => "DATE",
+            s if s.contains("Time64") => "TIME",
+            s if s.contains("Timestamp") => "TIMESTAMP",
+            s if s.contains("Interval") => "INTERVAL",
+            s if s.contains("Decimal") => "DECIMAL",
+            s if s.contains("List") => "LIST",
+            s if s.contains("Struct") => "STRUCT",
+            s if s.contains("Map") => "MAP",
+            s if s.contains("Null") => "NULL",
+            _ => "UNKNOWN",
+        };
+        column_types.push(sql_type.to_string());
+    }
+    Ok(column_types)
 }
 
 #[instrument(skip(state))]

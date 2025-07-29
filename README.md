@@ -15,6 +15,8 @@ A production-ready, high-performance REST API server for DuckDB written in Rust.
 - 🛡️ **Robust Error Handling**: Sanitized error responses with detailed error codes
 - 🧪 **Well Tested**: Complete integration test suite covering security and functionality
 - 📚 **Fully Documented**: Comprehensive API documentation for all public interfaces
+- 🎯 **Complete Type Support**: All DuckDB data types supported with proper JSON conversion
+- 📋 **Column Metadata**: Response includes both column names and SQL type information
 
 ## Quick Start
 
@@ -114,12 +116,14 @@ Execute SQL queries with automatic detection of query vs command operations.
 {
   "success": true,
   "data": {
-    "columns": ["name", "age"],
+    "columns": ["name", "age", "salary"],
+    "column_types": ["VARCHAR", "INTEGER", "DECIMAL"],
     "rows": [
-      ["Alice", 25],
-      ["Bob", 30]
+      ["Alice", 25, 75000.50],
+      ["Bob", 30, 85000.75]
     ],
-    "row_count": 2
+    "row_count": 2,
+    "limit_applied": 10000
   },
   "error": null,
   "query_id": "uuid-here",
@@ -179,7 +183,26 @@ curl -X POST http://localhost:3001/query \
 ```bash
 curl -X POST http://localhost:3001/query \
   -H "Content-Type: application/json" \
-  -d '{"sql": "SELECT age, COUNT(*) as count FROM users GROUP BY age ORDER BY age"}'
+  -d '{"sql": "SELECT age, COUNT(*) as count, AVG(salary)::DECIMAL(10,2) as avg_salary FROM users GROUP BY age ORDER BY age"}'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "columns": ["age", "count", "avg_salary"],
+    "column_types": ["INTEGER", "BIGINT", "DECIMAL"],
+    "rows": [
+      [25, 3, 65000.50],
+      [30, 2, 75000.00]
+    ],
+    "row_count": 2,
+    "limit_applied": 10000
+  },
+  "query_id": "uuid-here",
+  "execution_time_ms": 8
+}
 ```
 
 ## Security Features
@@ -219,8 +242,66 @@ Example error response for blocked operations:
 ### Information Disclosure Prevention
 
 - **BLOB Sanitization**: Binary data shows as `<BLOB X bytes>` instead of raw content
-- **Unknown Type Handling**: Unsupported types show as `<UNSUPPORTED_TYPE>`
+- **Complex Type Handling**: Lists, maps, and structs are represented as readable strings
 - **Error Sanitization**: Database errors are sanitized to prevent schema leakage
+
+## Data Type Support
+
+RSDuck provides comprehensive support for all DuckDB data types with proper JSON conversion:
+
+### Numeric Types
+- **Integers**: `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `HUGEINT` → JSON numbers
+- **Unsigned**: `UTINYINT`, `USMALLINT`, `UINTEGER`, `UBIGINT` → JSON numbers
+- **Floating Point**: `FLOAT`, `DOUBLE` → JSON numbers
+- **Decimals**: `DECIMAL(p,s)` → JSON numbers (preserves precision)
+
+### Text & Binary
+- **Text**: `VARCHAR`, `TEXT` → JSON strings
+- **Binary**: `BLOB` → JSON strings with size information
+
+### Boolean
+- **Boolean**: `BOOLEAN` → JSON booleans
+
+### Date & Time
+- **Date**: `DATE` → JSON strings (ISO format)
+- **Time**: `TIME` → JSON strings (HH:MM:SS format)
+- **Timestamp**: `TIMESTAMP` → JSON strings (ISO format)
+- **Interval**: `INTERVAL` → JSON strings (readable format)
+
+### Complex Types
+- **Arrays**: `LIST` → JSON strings (basic representation)
+- **Objects**: `STRUCT` → JSON strings (basic representation)
+- **Maps**: `MAP` → JSON strings (basic representation)
+
+### Special Types
+- **Null**: `NULL` → JSON null
+- **UUID**: `UUID` → JSON strings
+
+### Response Format
+
+All query responses include both column names and their DuckDB SQL types:
+
+```json
+{
+  "success": true,
+  "data": {
+    "columns": ["user_id", "name", "balance", "created_at", "is_active"],
+    "column_types": ["INTEGER", "VARCHAR", "DECIMAL", "TIMESTAMP", "BOOLEAN"],
+    "rows": [
+      [1, "Alice", 1250.75, "2023-12-25 14:30:00", true]
+    ],
+    "row_count": 1,
+    "limit_applied": 10000
+  }
+}
+```
+
+**Key Features:**
+- `columns`: Array of column names in result order
+- `column_types`: Array of SQL type names (as used in CREATE TABLE)
+- `rows`: 2D array of data values with proper JSON types
+- DECIMAL values are returned as JSON numbers (not quoted strings)
+- Complex types (LIST, STRUCT, MAP) are simplified to readable strings
 
 ## Performance & Scalability
 
@@ -299,6 +380,9 @@ Test coverage includes:
 - Security protections (read-only, SQL injection)
 - Error handling scenarios
 - Connection pool behavior
+- Comprehensive DuckDB type support
+- DECIMAL precision handling
+- Complex type representation
 
 ## Development
 
@@ -410,6 +494,13 @@ Check file permissions on the database file and directory.
 Error: Out of memory
 ```
 Use smaller `limit` values or optimize queries to return fewer rows.
+
+### Type Compatibility
+RSDuck automatically converts all DuckDB types to appropriate JSON representations:
+- Numbers remain as JSON numbers for easy client parsing
+- DECIMAL values preserve precision as JSON numbers
+- Complex types are converted to readable string representations
+- All responses include `column_types` for client-side type handling
 
 ### Build Issues
 ```
