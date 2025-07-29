@@ -1,0 +1,26 @@
+config:
+  target: 'http://localhost:3001'
+  phases:
+    - duration: 10
+      arrivalRate: 100
+
+scenarios:
+  - name: "Mixed endpoints"
+    flow:
+      - get:
+          url: "/health"
+          weight: 10
+      - post:
+          url: "/query"
+          weight: 45
+          headers:
+            Content-Type: "application/json"
+          json:
+            sql: "SUMMARIZE FROM duckdb_extensions();"
+      - post:
+          url: "/query"
+          weight: 45
+          headers:
+            Content-Type: "application/json"
+          json:
+            sql: "SUMMARIZE FROM duckdb_settings();"
