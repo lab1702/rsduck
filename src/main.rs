@@ -87,8 +87,78 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("  cargo run -- --database mydb.duckdb         # Read-only file");
     tracing::info!("  cargo run -- --database mydb.duckdb --readwrite  # Read-write file");
     tracing::info!("  cargo run -- --port 8080                    # Custom port");
+    tracing::info!("Press Ctrl+C to stop the server");
 
-    axum::serve(listener, app).await?;
+    // Set up graceful shutdown
+    let server = axum::serve(listener, app);
+    
+    // Handle Ctrl+C for graceful shutdown on both Unix and Windows
+    let shutdown_signal = async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+            
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    tracing::info!("Received SIGTERM, shutting down gracefully...");
+                }
+                _ = sigint.recv() => {
+                    tracing::info!("Received SIGINT (Ctrl+C), shutting down gracefully...");
+                }
+            }
+        }
+        
+        #[cfg(windows)]
+        {
+            use tokio::signal::windows::{ctrl_c, ctrl_break, ctrl_close, ctrl_logoff, ctrl_shutdown};
+            
+            let mut ctrl_c = ctrl_c().expect("failed to install Ctrl+C handler");
+            let mut ctrl_break = ctrl_break().expect("failed to install Ctrl+Break handler");
+            let mut ctrl_close = ctrl_close().expect("failed to install Ctrl+Close handler");
+            let mut ctrl_logoff = ctrl_logoff().expect("failed to install Ctrl+Logoff handler");
+            let mut ctrl_shutdown = ctrl_shutdown().expect("failed to install Ctrl+Shutdown handler");
+            
+            tokio::select! {
+                _ = ctrl_c.recv() => {
+                    tracing::info!("Received Ctrl+C, shutting down gracefully...");
+                }
+                _ = ctrl_break.recv() => {
+                    tracing::info!("Received Ctrl+Break, shutting down gracefully...");
+                }
+                _ = ctrl_close.recv() => {
+                    tracing::info!("Received Ctrl+Close, shutting down gracefully...");
+                }
+                _ = ctrl_logoff.recv() => {
+                    tracing::info!("Received Ctrl+Logoff, shutting down gracefully...");
+                }
+                _ = ctrl_shutdown.recv() => {
+                    tracing::info!("Received Ctrl+Shutdown, shutting down gracefully...");
+                }
+            }
+        }
+        
+        #[cfg(not(any(unix, windows)))]
+        {
+            // Fallback for other platforms
+            tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+            tracing::info!("Received Ctrl+C, shutting down gracefully...");
+        }
+    };
+
+    // Run server with graceful shutdown
+    tokio::select! {
+        result = server => {
+            if let Err(err) = result {
+                tracing::error!("Server error: {}", err);
+                return Err(err.into());
+            }
+        }
+        _ = shutdown_signal => {
+            tracing::info!("Shutdown signal received, server is stopping...");
+        }
+    }
 
     Ok(())
 }
